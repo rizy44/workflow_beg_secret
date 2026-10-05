@@ -1,0 +1,75 @@
+name: OpenBao secrets
+description: >
+  Log in to OpenBao with the job's GitHub OIDC token (or AppRole) and export
+  KV v2 secrets as environment variables for the following steps of the job.
+
+# Usage (in any repository of the org):
+#
+#   jobs:
+#     build:
+#       permissions:
+#         contents: read
+#         id-token: write          # required for auth_method=jwt
+#       steps:
+#         - uses: rizy44/workflow_beg_secret/.github/actions/openbao-secrets@main
+#           with:
+#             bao_addr: ${{ vars.BAO_ADDR }}
+#             secrets: |
+#               github/dockerhub username | DOCKERHUB_USERNAME
+#               github/dockerhub token    | DOCKERHUB_TOKEN
+#         - run: echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+
+inputs:
+  bao_addr:
+    description: OpenBao address, e.g. https://openbao.example.com:8200
+    required: true
+  secrets:
+    description: "One per line: '<path> <key> [| ENV_NAME]' or '<path> * [| PREFIX_]'"
+    required: true
+  auth_method:
+    description: jwt (GitHub OIDC, no stored secret) | approle
+    default: jwt
+  role:
+    description: OpenBao jwt role
+    default: github-actions
+  jwt_mount:
+    default: jwt
+  audience:
+    description: Audience requested for the OIDC token (must match bound_audiences)
+    default: openbao
+  role_id:
+    description: AppRole role_id (auth_method=approle)
+    default: ""
+  secret_id:
+    description: AppRole secret_id (auth_method=approle)
+    default: ""
+  approle_mount:
+    default: approle
+  mount:
+    description: KV v2 mount
+    default: kv
+  namespace:
+    default: ""
+  ca_cert_pem:
+    description: PEM of a private CA, if OpenBao uses one
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch secrets from OpenBao
+      shell: bash
+      env:
+        BAO_ADDR: ${{ inputs.bao_addr }}
+        SECRETS_SPEC: ${{ inputs.secrets }}
+        BAO_AUTH_METHOD: ${{ inputs.auth_method }}
+        BAO_ROLE: ${{ inputs.role }}
+        BAO_JWT_MOUNT: ${{ inputs.jwt_mount }}
+        BAO_AUDIENCE: ${{ inputs.audience }}
+        BAO_ROLE_ID: ${{ inputs.role_id }}
+        BAO_SECRET_ID: ${{ inputs.secret_id }}
+        BAO_APPROLE_MOUNT: ${{ inputs.approle_mount }}
+        BAO_MOUNT: ${{ inputs.mount }}
+        BAO_NAMESPACE: ${{ inputs.namespace }}
+        BAO_CACERT_PEM: ${{ inputs.ca_cert_pem }}
+      run: python3 "$GITHUB_ACTION_PATH/fetch.py"

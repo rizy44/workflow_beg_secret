@@ -1,10 +1,18 @@
 # workflow_beg_secret
 
 Tooling dùng chung cho [`beg_secret_management-`](https://github.com/rizy44/beg_secret_management-):
-đồng bộ secret từ **OpenBao** sang **GitHub Actions secrets** và **Jenkins credentials**.
+
+- `.github/actions/openbao-secrets`: composite action, pipeline của mọi repo dùng để **đọc secret từ OpenBao lúc chạy**
+  (GitHub OIDC → OpenBao, export env có mask). Chỉ dùng thư viện chuẩn Python, không cần cài thêm gì.
+- `.github/workflows/sync.yml` + `scripts/`: **sync** secret từ OpenBao sang Jenkins credentials
+  (và GitHub secret cho các trường hợp ngoại lệ).
 
 ```
 workflow_beg_secret/
+├── .github/actions/openbao-secrets/
+│   ├── action.yml            # inputs: bao_addr, secrets, auth_method(jwt|approle), role, mount...
+│   └── fetch.py              # stdlib only
+├── examples/use-openbao-secrets.yml   # pipeline mẫu cho repo khác
 ├── .github/workflows/
 │   ├── sync.yml              # reusable workflow (workflow_call), target=github|jenkins
 │   └── ci.yml                # ruff + pytest cho scripts/
@@ -22,7 +30,21 @@ workflow_beg_secret/
 └── jenkins/                  # flow Jenkinsfile (xem jenkins/README.md)
 ```
 
-## CLI
+## Action `openbao-secrets`
+
+Cú pháp `secrets:` (mỗi dòng một mục, hoặc phân cách bằng `;`):
+
+| Dòng | Kết quả |
+|---|---|
+| `common/dockerhub token` | `TOKEN` |
+| `common/dockerhub token \| DOCKERHUB_TOKEN` | `DOCKERHUB_TOKEN` |
+| `github/aws-prod *` | mọi key → `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY` |
+| `github/aws-prod * \| AWS_` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` |
+
+Path tính từ mount `kv` (input `mount`). Lỗi (path/key không có, trùng tên env, tên bắt đầu bằng
+`GITHUB_`/`RUNNER_`/`ACTIONS_`) làm step fail và không export gì. Job gọi action cần `permissions: id-token: write`.
+
+## CLI sync
 
 ```bash
 cd scripts

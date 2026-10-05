@@ -87,4 +87,4 @@ def test_sample_manifest_is_valid():
 
     sample = Path(__file__).parent / "fixtures" / "secrets.yaml"
     m = load_manifest(sample)
-    assert m.github_targets and m.jenkins_stores
+    assert m.jenkins_stores and not m.github_targets
