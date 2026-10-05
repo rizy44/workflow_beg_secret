@@ -1,0 +1,166 @@
+# Reusable workflow: sync secrets from OpenBao to GitHub Actions or Jenkins.
+#
+# Called from rizy44/beg_secret_management-, e.g.:
+#
+#   jobs:
+#     github:
+#       uses: rizy44/workflow_beg_secret/.github/workflows/sync.yml@main
+#       with:
+#         target: github
+#         bao_addr: ${{ vars.BAO_ADDR }}
+#       secrets: inherit
+#
+# Auth to OpenBao uses GitHub OIDC (jwt auth method) -> no static OpenBao token
+# is stored in GitHub. The OIDC token's `job_workflow_ref` claim points to THIS
+# file, so the OpenBao role can be bound to "only this reusable workflow, only
+# when called from beg_secret_management".
+name: reusable-sync-secrets
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: "github | jenkins"
+        type: string
+        required: true
+      bao_addr:
+        description: "OpenBao address, e.g. https://openbao.example.com:8200"
+        type: string
+        required: true
+      bao_role:
+        description: "OpenBao jwt auth role"
+        type: string
+        default: beg-secret-sync
+      bao_jwt_mount:
+        type: string
+        default: jwt
+      bao_audience:
+        description: "Audience requested for the GitHub OIDC token (must match bound_audiences)"
+        type: string
+        default: openbao
+      config_path:
+        description: "Manifest path inside the caller repository"
+        type: string
+        default: config/secrets.yaml
+      dry_run:
+        type: boolean
+        default: false
+      only:
+        description: "Space separated destination labels to limit the run (optional)"
+        type: string
+        default: ""
+      runs_on:
+        description: 'JSON runner spec, e.g. "ubuntu-latest" or ["self-hosted","linux"]'
+        type: string
+        default: '"ubuntu-latest"'
+      environment:
+        description: "Optional GitHub environment for approvals (changes the OIDC sub claim!)"
+        type: string
+        default: ""
+      tooling_repository:
+        type: string
+        default: rizy44/workflow_beg_secret
+      tooling_ref:
+        description: "Ref of the tooling repo to check out; keep in sync with the @ref in `uses:`"
+        type: string
+        default: main
+    secrets:
+      GH_APP_ID:
+        description: "GitHub App id (App needs Secrets: write on target repos/org)"
+        required: false
+      GH_APP_PRIVATE_KEY:
+        required: false
+      GH_SYNC_TOKEN:
+        description: "Alternative to the App: fine-grained PAT with Secrets: write"
+        required: false
+      JENKINS_USER:
+        description: "Optional; otherwise read from jenkins.auth in OpenBao"
+        required: false
+      JENKINS_API_TOKEN:
+        required: false
+      BAO_CACERT_PEM:
+        description: "Optional PEM of the private CA for OpenBao/Jenkins"
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  sync:
+    name: sync ${{ inputs.target }}${{ inputs.dry_run && ' (dry-run)' || '' }}
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 15
+    env:
+      HAS_APP: ${{ secrets.GH_APP_ID != '' }}
+      HAS_CA: ${{ secrets.BAO_CACERT_PEM != '' }}
+    steps:
+      - name: Validate inputs
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          case "$TARGET" in github|jenkins) ;; *) echo "::error::target must be github or jenkins"; exit 1;; esac
+
+      - name: Mint GitHub App token
+        id: app
+        if: env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Checkout manifest (caller repo)
+        uses: actions/checkout@v4
+        with:
+          path: caller
+          persist-credentials: false
+
+      - name: Checkout tooling
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.tooling_repository }}
+          ref: ${{ inputs.tooling_ref }}
+          path: tooling
+          token: ${{ steps.app.outputs.token || secrets.GH_SYNC_TOKEN || github.token }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tooling/scripts/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r tooling/scripts/requirements.txt
+
+      - name: Write CA bundle
+        if: env.HAS_CA == 'true'
+        env:
+          PEM: ${{ secrets.BAO_CACERT_PEM }}
+        run: |
+          printf '%s\n' "$PEM" > "$RUNNER_TEMP/ca.pem"
+          echo "BAO_CACERT=$RUNNER_TEMP/ca.pem" >> "$GITHUB_ENV"
+          echo "JENKINS_CACERT=$RUNNER_TEMP/ca.pem" >> "$GITHUB_ENV"
+
+      - name: Sync
+        working-directory: tooling/scripts
+        env:
+          BAO_ADDR: ${{ inputs.bao_addr }}
+          BAO_AUTH_METHOD: jwt
+          BAO_JWT_ROLE: ${{ inputs.bao_role }}
+          BAO_JWT_MOUNT: ${{ inputs.bao_jwt_mount }}
+          BAO_JWT_AUDIENCE: ${{ inputs.bao_audience }}
+          GH_TOKEN: ${{ steps.app.outputs.token || secrets.GH_SYNC_TOKEN }}
+          JENKINS_USER: ${{ secrets.JENKINS_USER }}
+          JENKINS_API_TOKEN: ${{ secrets.JENKINS_API_TOKEN }}
+          TARGET: ${{ inputs.target }}
+          CONFIG: ${{ github.workspace }}/caller/${{ inputs.config_path }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          ONLY: ${{ inputs.only }}
+        run: |
+          args=(--config "$CONFIG")
+          [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
+          for label in $ONLY; do args+=(--only "$label"); done
+          python -m beg_secret "sync-$TARGET" "${args[@]}"
