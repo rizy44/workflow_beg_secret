@@ -1,0 +1,18 @@
+[project]
+name = "workflow-beg-secret"
+version = "0.2.0"
+description = "Fetch CI secrets from OpenBao (AppRole, KV v1/v2) into GitHub Actions and Jenkins"
+readme = "README.md"
+requires-python = ">=3.8"
+# Runtime uses only the Python standard library: nothing to install on runners/agents.
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=7", "ruff>=0.5"]
+
+[project.scripts]
+workflow-beg-secret = "scripts.main:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

@@ -1,0 +1,108 @@
+name: OpenBao secrets
+description: >
+  Log in to OpenBao with AppRole, fetch KV secrets, mask them and export them as
+  environment variables for the next steps of the job. Run it again with
+  `command: revoke` (if: always()) at the end of the job to revoke the token.
+author: rizy44
+
+# Usage:
+#   steps:
+#     - uses: rizy44/workflow_beg_secret@main
+#       with:
+#         url: ${{ vars.OPENBAO_URL }}
+#         namespace: ${{ vars.OPENBAO_NAMESPACE }}
+#         role-id: ${{ secrets.OPENBAO_ROLE_ID }}
+#         secret-id: ${{ secrets.OPENBAO_SECRET_ID }}
+#         secrets: |
+#           PATH=ci/artifactory,PREFIX=ARTIFACTORY_
+#           PATH=ci/dockerhub,KEYS=username|token,PREFIX=DOCKERHUB_
+#     - run: ./scripts/build.sh            # $ARTIFACTORY_API_KEY, $DOCKERHUB_TOKEN ... are set
+#     - if: always()
+#       uses: rizy44/workflow_beg_secret@main
+#       with:
+#         command: revoke
+#         url: ${{ vars.OPENBAO_URL }}
+#         namespace: ${{ vars.OPENBAO_NAMESPACE }}
+
+inputs:
+  command:
+    description: "fetch (stages 1-4) | revoke (stage 5)"
+    default: fetch
+  url:
+    description: OpenBao address, e.g. https://openbao.example.com:8200
+    required: true
+  namespace:
+    description: OpenBao namespace
+    default: ""
+  role-id:
+    description: AppRole role_id (fetch only)
+    default: ""
+  secret-id:
+    description: AppRole secret_id (fetch only)
+    default: ""
+  approle-mount:
+    default: approle
+  secrets:
+    description: "Secret specs, one per line: PATH=<path>[,PREFIX=<P_>][,KEYS=a|b][,MOUNT=<m>][,KV=1|2]"
+    default: ""
+  secrets-file:
+    description: File in the workspace with one secret spec per line (alternative to `secrets`)
+    default: ""
+  mount:
+    description: Secret engine mount
+    default: kv/test
+  kv-version:
+    description: "1 or 2"
+    default: "2"
+  export-token:
+    description: "true: export OPENBAO_TOKEN and revoke later with command: revoke. false: revoke right after fetching"
+    default: "true"
+  cacert:
+    description: Path to a CA bundle for a private CA
+    default: ""
+
+outputs:
+  keys:
+    description: Comma separated names of the exported secret variables (never values)
+    value: ${{ steps.fetch.outputs.keys }}
+
+runs:
+  using: composite
+  steps:
+    - name: OpenBao fetch
+      id: fetch
+      if: inputs.command == 'fetch'
+      shell: bash
+      env:
+        OPENBAO_URL: ${{ inputs.url }}
+        OPENBAO_NAMESPACE: ${{ inputs.namespace }}
+        OPENBAO_ROLE_ID: ${{ inputs.role-id }}
+        OPENBAO_SECRET_ID: ${{ inputs.secret-id }}
+        OPENBAO_APPROLE_MOUNT: ${{ inputs.approle-mount }}
+        OPENBAO_SECRETS: ${{ inputs.secrets }}
+        OPENBAO_MOUNT: ${{ inputs.mount }}
+        OPENBAO_KV_VERSION: ${{ inputs.kv-version }}
+        OPENBAO_CACERT: ${{ inputs.cacert }}
+        SECRETS_FILE: ${{ inputs.secrets-file }}
+        EXPORT_TOKEN: ${{ inputs.export-token }}
+      run: |
+        args=(fetch --platform github)
+        if [ -n "$SECRETS_FILE" ]; then args+=(--secrets-file "$SECRETS_FILE"); fi
+        if [ "$EXPORT_TOKEN" = "false" ]; then args+=(--no-export-token); fi
+        python3 "$GITHUB_ACTION_PATH/scripts/main.py" "${args[@]}"
+
+    - name: OpenBao revoke
+      if: inputs.command == 'revoke'
+      shell: bash
+      env:
+        OPENBAO_URL: ${{ inputs.url }}
+        OPENBAO_NAMESPACE: ${{ inputs.namespace }}
+        OPENBAO_CACERT: ${{ inputs.cacert }}
+      run: python3 "$GITHUB_ACTION_PATH/scripts/main.py" revoke
+
+    - name: Unknown command
+      if: inputs.command != 'fetch' && inputs.command != 'revoke'
+      shell: bash
+      run: |
+        echo "::error::openbao action: command must be 'fetch' or 'revoke'"
+        exit 1

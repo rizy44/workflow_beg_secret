@@ -1,0 +1,17 @@
+line-length = 120
+target-version = "py38"
+
+[lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = [
+    "S101",   # assert is fine in tests and for internal invariants
+    "S310",   # urllib with a user-configured OpenBao URL is the point of the tool
+    "UP006",  # keep typing-compatible annotations readable for py38
+    "UP007",
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["S105", "S106", "S603", "E501"]
+
+[lint.isort]
+known-first-party = ["scripts", "tests"]
