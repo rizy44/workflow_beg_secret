@@ -1,6 +1,6 @@
 import pytest
 
-from beg_secret.config import ConfigError, SecretRef, parse_manifest
+from common.manifest import ConfigError, SecretRef, parse_manifest
 
 
 def _gh(**over):
@@ -83,7 +83,7 @@ def test_jenkins_requires_url():
 def test_sample_manifest_is_valid():
     from pathlib import Path
 
-    from beg_secret.config import load_manifest
+    from common.manifest import load_manifest
 
     sample = Path(__file__).parent / "fixtures" / "secrets.yaml"
     m = load_manifest(sample)

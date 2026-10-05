@@ -1,13 +1,15 @@
-# Reusable workflow: sync secrets from OpenBao to GitHub Actions or Jenkins.
+# Reusable workflow: copy OpenBao secrets into Jenkins credentials (or GitHub secrets)
+# by running scripts/openbao/sync_secrets.py against the caller's manifest.
 #
 # Called from rizy44/beg_secret_management-, e.g.:
 #
 #   jobs:
-#     github:
+#     jenkins:
 #       uses: rizy44/workflow_beg_secret/.github/workflows/sync.yml@main
 #       with:
-#         target: github
+#         target: jenkins
 #         bao_addr: ${{ vars.BAO_ADDR }}
+#         bao_namespace: ${{ vars.BAO_NAMESPACE }}
 #       secrets: inherit
 #
 # Auth to OpenBao uses GitHub OIDC (jwt auth method) -> no static OpenBao token
@@ -27,10 +29,13 @@ on:
         description: "OpenBao address, e.g. https://openbao.example.com:8200"
         type: string
         required: true
+      bao_namespace:
+        type: string
+        default: ""
       bao_role:
         description: "OpenBao jwt auth role"
         type: string
-        default: beg-secret-sync
+        default: jenkins-sync
       bao_jwt_mount:
         type: string
         default: jwt
@@ -145,9 +150,9 @@ jobs:
           echo "JENKINS_CACERT=$RUNNER_TEMP/ca.pem" >> "$GITHUB_ENV"
 
       - name: Sync
-        working-directory: tooling/scripts
         env:
           BAO_ADDR: ${{ inputs.bao_addr }}
+          BAO_NAMESPACE: ${{ inputs.bao_namespace }}
           BAO_AUTH_METHOD: jwt
           BAO_JWT_ROLE: ${{ inputs.bao_role }}
           BAO_JWT_MOUNT: ${{ inputs.bao_jwt_mount }}
@@ -163,4 +168,4 @@ jobs:
           args=(--config "$CONFIG")
           [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
           for label in $ONLY; do args+=(--only "$label"); done
-          python -m beg_secret "sync-$TARGET" "${args[@]}"
+          python tooling/scripts/openbao/sync_secrets.py "sync-$TARGET" "${args[@]}"

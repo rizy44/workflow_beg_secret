@@ -20,7 +20,7 @@ from urllib.parse import quote
 import requests
 from nacl import encoding, public
 
-from beg_secret.config import GitHubTarget
+from common.manifest import GitHubTarget
 
 log = logging.getLogger(__name__)
 

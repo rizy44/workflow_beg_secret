@@ -23,7 +23,7 @@ from xml.sax.saxutils import escape
 
 import requests
 
-from beg_secret.config import JenkinsCredential, JenkinsStore
+from common.manifest import JenkinsCredential, JenkinsStore
 
 log = logging.getLogger(__name__)
 

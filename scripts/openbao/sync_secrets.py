@@ -1,14 +1,17 @@
-"""Command line entrypoint.
+#!/usr/bin/env python3
+"""Stage: copy OpenBao secrets into Jenkins credentials (or GitHub secrets) from a manifest.
 
-    python -m beg_secret validate     --config ../config/secrets.yaml
-    python -m beg_secret sync-github  --config ../config/secrets.yaml [--dry-run] [--only owner/repo]
-    python -m beg_secret sync-jenkins --config ../config/secrets.yaml [--dry-run] [--only system]
+Needs `pip install -r scripts/requirements.txt`.
+
+    python3 scripts/openbao/sync_secrets.py validate     --config config/secrets.yaml
+    python3 scripts/openbao/sync_secrets.py sync-jenkins --config config/secrets.yaml [--dry-run] [--only system]
+    python3 scripts/openbao/sync_secrets.py sync-github  --config config/secrets.yaml [--dry-run] [--only org:NAME]
 
 `--dry-run` still logs in to OpenBao and resolves every referenced value (so a
 wrong path/key fails the run) and checks write access on the destination, but
 does not write anything.
 
-Environment (besides the BAO_* variables, see openbao_client.py):
+Environment (besides the BAO_* variables, see scripts/common/openbao.py):
     GH_TOKEN            token allowed to write Actions secrets on the targets
     GITHUB_API_URL      set automatically on Actions (default https://api.github.com)
     JENKINS_URL         overrides jenkins.url from the manifest
@@ -24,14 +27,21 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
-from beg_secret import __version__
-from beg_secret.config import ConfigError, Manifest, load_manifest
-from beg_secret.github_secrets import GitHubSecretsClient
-from beg_secret.jenkins_credentials import JenkinsClient
-from beg_secret.openbao_client import OpenBaoClient, mask
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-log = logging.getLogger("beg_secret")
+from common import ci  # noqa: E402
+from common.github_api import GitHubSecretsClient  # noqa: E402
+from common.jenkins_api import JenkinsClient  # noqa: E402
+from common.manifest import ConfigError, Manifest, SecretRef, load_manifest  # noqa: E402
+from common.openbao import OpenBao, OpenBaoError  # noqa: E402
+
+log = logging.getLogger("sync_secrets")
+
+
+def resolve(bao: OpenBao, ref: SecretRef) -> str:
+    return bao.get(ref.mount, ref.path, ref.key)
 
 
 @dataclass
@@ -49,7 +59,7 @@ class Result:
 # --------------------------------------------------------------------------- github
 
 
-def sync_github(manifest: Manifest, bao: OpenBaoClient, dry_run: bool, only: list[str]) -> list[Result]:
+def sync_github(manifest: Manifest, bao: OpenBao, dry_run: bool, only: list[str]) -> list[Result]:
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     gh = GitHubSecretsClient(token, os.environ.get("GITHUB_API_URL", "https://api.github.com")) if token else None
     if not gh and not dry_run:
@@ -68,7 +78,7 @@ def sync_github(manifest: Manifest, bao: OpenBaoClient, dry_run: bool, only: lis
         for secret in target.secrets:
             res = Result(target.label, secret.name, str(secret.ref), "")
             try:
-                value = bao.resolve(secret.ref)
+                value = resolve(bao, secret.ref)
                 if access_error:
                     raise RuntimeError(f"no access to target: {access_error}")
                 if dry_run:
@@ -85,23 +95,23 @@ def sync_github(manifest: Manifest, bao: OpenBaoClient, dry_run: bool, only: lis
 # --------------------------------------------------------------------------- jenkins
 
 
-def _jenkins_client(manifest: Manifest, bao: OpenBaoClient) -> JenkinsClient:
+def _jenkins_client(manifest: Manifest, bao: OpenBao) -> JenkinsClient:
     url = os.environ.get("JENKINS_URL") or manifest.jenkins_url
     if not url:
         raise SystemExit("Jenkins URL missing: set jenkins.url in the manifest or JENKINS_URL")
     user = os.environ.get("JENKINS_USER")
     token = os.environ.get("JENKINS_API_TOKEN")
     if not user and manifest.jenkins_auth.username_ref:
-        user = bao.resolve(manifest.jenkins_auth.username_ref)
+        user = resolve(bao, manifest.jenkins_auth.username_ref)
     if not token and manifest.jenkins_auth.token_ref:
-        token = bao.resolve(manifest.jenkins_auth.token_ref)
+        token = resolve(bao, manifest.jenkins_auth.token_ref)
     if not user or not token:
         raise SystemExit("Jenkins credentials missing: set JENKINS_USER/JENKINS_API_TOKEN or jenkins.auth")
-    mask(token)
+    ci.mask(token)
     return JenkinsClient(url, user, token, verify=os.environ.get("JENKINS_CACERT") or True)
 
 
-def sync_jenkins(manifest: Manifest, bao: OpenBaoClient, dry_run: bool, only: list[str]) -> list[Result]:
+def sync_jenkins(manifest: Manifest, bao: OpenBao, dry_run: bool, only: list[str]) -> list[Result]:
     if not manifest.jenkins_stores:
         log.info("[jenkins] no stores in manifest, nothing to do")
         return []
@@ -120,7 +130,7 @@ def sync_jenkins(manifest: Manifest, bao: OpenBaoClient, dry_run: bool, only: li
         for cred in store.credentials:
             res = Result(store.label, cred.id, ", ".join(str(r) for r in cred.refs.values()), "")
             try:
-                values = {field: bao.resolve(ref) for field, ref in cred.refs.items()}
+                values = {field: resolve(bao, ref) for field, ref in cred.refs.items()}
                 if cred.username:
                     values["username"] = cred.username
                 if store_error:
@@ -142,25 +152,20 @@ def sync_jenkins(manifest: Manifest, bao: OpenBaoClient, dry_run: bool, only: li
 
 
 def write_summary(title: str, results: list[Result]) -> None:
-    path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if not path:
-        return
     lines = [f"### {title}", "", "| Destination | Name | OpenBao source | Status |", "|---|---|---|---|"]
     for r in results:
         icon = "❌" if r.failed else "✅"
         lines.append(f"| `{r.destination}` | `{r.name}` | `{r.source}` | {icon} {r.status} |")
     if not results:
         lines.append("| - | - | - | nothing to sync |")
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n\n")
+    ci.step_summary("\n".join(lines))
 
 
 # --------------------------------------------------------------------------- main
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="beg_secret", description=__doc__.split("\n\n")[0])
-    p.add_argument("--version", action="version", version=__version__)
+    p = argparse.ArgumentParser(prog="sync_secrets.py", description="Copy OpenBao secrets into Jenkins / GitHub.")
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="command", required=True)
     for name in ("validate", "sync-github", "sync-jenkins"):
@@ -195,7 +200,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "validate":
         return 0
 
-    bao = OpenBaoClient.from_env()
+    try:
+        bao = OpenBao.from_env()
+    except OpenBaoError as exc:
+        ci.error(f"sync_secrets: {exc}")
+        return 1
     try:
         if args.command == "sync-github":
             results = sync_github(manifest, bao, args.dry_run, args.only)
@@ -204,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
             results = sync_jenkins(manifest, bao, args.dry_run, args.only)
             write_summary("Jenkins credentials" + (" (dry-run)" if args.dry_run else ""), results)
     finally:
-        bao.revoke_self()
+        bao.revoke()
 
     failed = [r for r in results if r.failed]
     log.info("done: %d ok, %d failed", len(results) - len(failed), len(failed))

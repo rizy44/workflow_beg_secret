@@ -1,75 +1,103 @@
 # workflow_beg_secret
 
-Tooling dùng chung cho [`beg_secret_management-`](https://github.com/rizy44/beg_secret_management-):
-
-- `.github/actions/openbao-secrets`: composite action, pipeline của mọi repo dùng để **đọc secret từ OpenBao lúc chạy**
-  (GitHub OIDC → OpenBao, export env có mask). Chỉ dùng thư viện chuẩn Python, không cần cài thêm gì.
-- `.github/workflows/sync.yml` + `scripts/`: **sync** secret từ OpenBao sang Jenkins credentials
-  (và GitHub secret cho các trường hợp ngoại lệ).
+**Generic CI workflow** dùng chung cho mọi repo. Logic nằm trong `scripts/` theo
+từng stage, nên **GitHub Actions và Jenkins gọi cùng một script**. Secret lấy từ
+**OpenBao** lúc chạy, GitHub không cần lưu secret nào.
 
 ```
 workflow_beg_secret/
-├── .github/actions/openbao-secrets/
-│   ├── action.yml            # inputs: bao_addr, secrets, auth_method(jwt|approle), role, mount...
-│   └── fetch.py              # stdlib only
-├── examples/use-openbao-secrets.yml   # pipeline mẫu cho repo khác
-├── .github/workflows/
-│   ├── sync.yml              # reusable workflow (workflow_call), target=github|jenkins
-│   └── ci.yml                # ruff + pytest cho scripts/
-├── scripts/
-│   ├── beg_secret/
-│   │   ├── __main__.py       # python -m beg_secret ...
-│   │   ├── cli.py            # validate | sync-github | sync-jenkins, --dry-run, --only
-│   │   ├── config.py         # đọc + validate manifest secrets.yaml
-│   │   ├── openbao_client.py # login token/jwt(GitHub OIDC)/approle, đọc KV v2
-│   │   ├── github_secrets.py # mã hóa sealed box + PUT repo/environment/org secret
-│   │   └── jenkins_credentials.py # create/update string, usernamePassword, file, sshPrivateKey
+├── .github/
+│   ├── workflows/
+│   │   ├── pipeline.yml          # generic reusable workflow: checkout → secrets → setup/lint/test/build/deploy
+│   │   ├── sync.yml              # reusable: copy OpenBao → Jenkins credentials (beg_secret_management dùng)
+│   │   └── ci.yml                # ruff + pytest cho scripts/
+│   └── actions/openbao-secrets/  # composite action, chỉ bọc scripts/openbao/fetch_secrets.py
+├── scripts/                      # ← toàn bộ logic, gọi được từ GitHub Actions lẫn Jenkins
+│   ├── common/                   # module dùng chung
+│   │   ├── openbao.py            #   client OpenBao (stdlib): token / jwt (GitHub OIDC) / approle, namespace, KV v2
+│   │   ├── ci.py                 #   nhận diện GitHub/Jenkins/local, mask, GITHUB_ENV, dotenv
+│   │   ├── manifest.py           #   manifest cho stage sync
+│   │   ├── github_api.py         #   ghi GitHub secret (dùng cho ngoại lệ)
+│   │   └── jenkins_api.py        #   ghi Jenkins credential
+│   ├── openbao/                  # stage "secrets"
+│   │   ├── fetch_secrets.py      #   lấy secret cho job (KHÔNG cần pip install)
+│   │   └── sync_secrets.py       #   sync sang Jenkins (cần requirements.txt)
 │   ├── tests/
-│   ├── requirements.txt / requirements-dev.txt / pyproject.toml
-├── helm/                     # (để sau) chart Jenkins + seed job
-└── jenkins/                  # flow Jenkinsfile (xem jenkins/README.md)
+│   └── requirements*.txt, pyproject.toml
+├── jenkins/Jenkinsfile.example   # Jenkins gọi cùng scripts/
+├── examples/                     # pipeline mẫu cho repo khác + file spec mẫu
+└── helm/                         # (để sau)
 ```
 
-## Action `openbao-secrets`
+## OpenBao
 
-Cú pháp `secrets:` (mỗi dòng một mục, hoặc phân cách bằng `;`):
+| Biến | Mặc định trong workflow | Ghi chú |
+|---|---|---|
+| `BAO_ADDR` | variable `BAO_ADDR` | bắt buộc |
+| `BAO_NAMESPACE` | variable `BAO_NAMESPACE` | namespace của bạn |
+| `BAO_MOUNT` | `kv/test` | mount KV v2; path trong spec tính từ mount này |
+| `BAO_AUTH_METHOD` | `jwt` trên GitHub | tự nhận diện nếu để trống: `BAO_TOKEN` → token, `BAO_ROLE_ID`+`BAO_SECRET_ID` → approle, có OIDC → jwt |
+| `BAO_ROLE` | `github-actions` | jwt role |
+| `BAO_CACERT` / `BAO_CACERT_PEM` | | CA riêng (đường dẫn file / nội dung PEM) |
 
-| Dòng | Kết quả |
-|---|---|
-| `common/dockerhub token` | `TOKEN` |
-| `common/dockerhub token \| DOCKERHUB_TOKEN` | `DOCKERHUB_TOKEN` |
-| `github/aws-prod *` | mọi key → `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY` |
-| `github/aws-prod * \| AWS_` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` |
+## Spec secret
 
-Path tính từ mount `kv` (input `mount`). Lỗi (path/key không có, trùng tên env, tên bắt đầu bằng
-`GITHUB_`/`RUNNER_`/`ACTIONS_`) làm step fail và không export gì. Job gọi action cần `permissions: id-token: write`.
+Viết inline (input `secrets:`) hoặc trong một file, ví dụ `.ci/secrets.txt` trong repo
+gọi tới. Cùng một file dùng được cho cả GitHub (`secrets_file:`) và Jenkins (`--spec-file`).
 
-## CLI sync
+```
+# <path> <key> [| ENV_NAME]        <path> * [| PREFIX_]
+github/dockerhub token | DOCKERHUB_TOKEN     -> DOCKERHUB_TOKEN
+github/dockerhub token                      -> TOKEN
+github/aws-prod * | AWS_                    -> AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, ...
+```
+Lỗi (path/key không tồn tại, trùng tên, tên bắt đầu bằng `GITHUB_`/`RUNNER_`/`ACTIONS_`/`BAO_`)
+làm stage fail và không export gì.
 
-```bash
-cd scripts
-pip install -r requirements.txt
-python -m beg_secret validate     --config path/to/secrets.yaml
-python -m beg_secret sync-github  --config path/to/secrets.yaml --dry-run
-python -m beg_secret sync-jenkins --config path/to/secrets.yaml --only system
+## GitHub Actions: gọi generic pipeline
+
+```yaml
+jobs:
+  ci:
+    uses: rizy44/workflow_beg_secret/.github/workflows/pipeline.yml@main
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      bao_addr: ${{ vars.BAO_ADDR }}
+      bao_namespace: ${{ vars.BAO_NAMESPACE }}
+      secrets_file: .ci/secrets.txt
+      test: ./scripts/test.sh
+      build: ./scripts/build.sh
 ```
 
-| Biến môi trường | Ý nghĩa |
-|---|---|
-| `BAO_ADDR` | địa chỉ OpenBao (bắt buộc) |
-| `BAO_AUTH_METHOD` | `token` (mặc định) \| `jwt` \| `approle` |
-| `BAO_TOKEN` | khi `token` |
-| `BAO_JWT_ROLE`, `BAO_JWT_MOUNT`=jwt, `BAO_JWT_AUDIENCE`=openbao | khi `jwt`; JWT tự lấy từ GitHub OIDC |
-| `BAO_ROLE_ID`, `BAO_SECRET_ID`, `BAO_APPROLE_MOUNT`=approle | khi `approle` (Jenkins) |
-| `BAO_NAMESPACE`, `BAO_CACERT` | tùy chọn |
-| `GH_TOKEN` | token ghi được secret ở repo/org đích |
-| `JENKINS_URL`, `JENKINS_USER`, `JENKINS_API_TOKEN`, `JENKINS_CACERT` | ghi đè `jenkins.*` trong manifest |
+- Thứ tự: checkout → **secrets** → setup → lint → test → build → deploy. Stage để trống thì bỏ qua.
+- Mỗi stage là một lệnh bash (`set -euo pipefail`) chạy trong `working_directory` của repo gọi tới.
+- `$CI_SCRIPTS` trỏ tới `scripts/` của repo này, để gọi script dùng chung.
+- Secret có trong env của mọi stage và đã được mask.
+- Input khác: `runs_on`, `environment`, `timeout_minutes`, `bao_mount`, `bao_auth_method`, `bao_role`, `ci_ref`.
 
-Exit code: `0` thành công, `1` có ít nhất một mục lỗi (các mục khác vẫn chạy tiếp),
-`2` manifest không hợp lệ. Khi chạy trên Actions, bảng kết quả được ghi vào job summary.
+Repo muốn giữ workflow riêng thì chỉ cần dùng step: `uses: rizy44/workflow_beg_secret/.github/actions/openbao-secrets@main`
+(xem `examples/own-workflow-action.yml`).
+
+## Jenkins: gọi cùng script
+
+```groovy
+dir('.workflow_beg_secret') { git url: 'https://github.com/rizy44/workflow_beg_secret.git', branch: 'main' }
+withCredentials([string(credentialsId: 'bao-role-id', variable: 'BAO_ROLE_ID'),
+                 string(credentialsId: 'bao-secret-id', variable: 'BAO_SECRET_ID')]) {
+  sh 'python3 .workflow_beg_secret/scripts/openbao/fetch_secrets.py --spec-file .ci/secrets.txt --exec -- ./scripts/build.sh'
+}
+```
+`--exec` chạy script của stage với secret nằm trong env của nó: không ghi ra đĩa, và token
+OpenBao bị revoke trước khi script chạy. Jenkins **không tự mask** giá trị lấy từ OpenBao,
+nên script không được echo secret. Đầy đủ: `jenkins/Jenkinsfile.example`.
+
+Các chế độ khác của `fetch_secrets.py`: `--output FILE` (dotenv, mode 600), `--format shell` (để `eval`).
 
 ## Dev
 
 ```bash
-cd scripts && pip install -r requirements-dev.txt && ruff check . && python -m pytest -q
+cd scripts && pip install -r requirements-dev.txt
+ruff check . && ruff format --check . && python -m pytest -q
 ```

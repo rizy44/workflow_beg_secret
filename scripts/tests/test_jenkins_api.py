@@ -1,8 +1,8 @@
 import base64
 import xml.etree.ElementTree as ET
 
-from beg_secret.config import JenkinsCredential, JenkinsStore
-from beg_secret.jenkins_credentials import FILE_CLASS, SSH_CLASS, JenkinsClient, build_credential_xml
+from common.jenkins_api import FILE_CLASS, SSH_CLASS, JenkinsClient, build_credential_xml
+from common.manifest import JenkinsCredential, JenkinsStore
 
 
 def _cred(t, **kw):

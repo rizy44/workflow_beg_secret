@@ -2,8 +2,8 @@ import base64
 
 from nacl import public
 
-from beg_secret.config import GitHubTarget
-from beg_secret.github_secrets import GitHubSecretsClient, encrypt_secret
+from common.github_api import GitHubSecretsClient, encrypt_secret
+from common.manifest import GitHubTarget
 
 
 def test_encrypt_roundtrip():

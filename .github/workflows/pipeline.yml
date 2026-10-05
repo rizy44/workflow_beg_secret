@@ -1,0 +1,195 @@
+# Generic pipeline (reusable workflow).
+#
+# Every stage is a command / script. Shared stage scripts live in this repo's
+# scripts/ and are reachable through $CI_SCRIPTS, so Jenkins can run exactly the
+# same scripts (see jenkins/Jenkinsfile.example).
+#
+#   jobs:
+#     ci:
+#       uses: rizy44/workflow_beg_secret/.github/workflows/pipeline.yml@main
+#       permissions:
+#         contents: read
+#         id-token: write
+#       with:
+#         bao_addr: ${{ vars.BAO_ADDR }}
+#         bao_namespace: ${{ vars.BAO_NAMESPACE }}
+#         secrets_file: .ci/secrets.txt      # or inline: secrets: |
+#         test: ./scripts/test.sh
+#         build: ./scripts/build.sh
+#
+# Order: checkout -> secrets (OpenBao -> masked env) -> setup -> lint -> test -> build -> deploy.
+# Empty stage inputs are skipped. Secrets are available to every stage of the job.
+name: generic-pipeline
+
+on:
+  workflow_call:
+    inputs:
+      # ---------------------------------------------------------------- runner
+      runs_on:
+        description: 'JSON runner spec: "ubuntu-latest" or ["self-hosted","linux"]'
+        type: string
+        default: '"ubuntu-latest"'
+      environment:
+        description: GitHub environment (approvals / protection rules); changes the OIDC `sub` claim
+        type: string
+        default: ""
+      timeout_minutes:
+        type: number
+        default: 60
+      working_directory:
+        description: Directory (in the caller repo) where stages run
+        type: string
+        default: "."
+      # ---------------------------------------------------------------- secrets
+      secrets:
+        description: "Secret spec, one per line: '<path> <key> [| ENV]' or '<path> * [| PREFIX_]'. Empty = no secrets."
+        type: string
+        default: ""
+      secrets_file:
+        description: "Path (in the caller repo) of a file with the secret spec, e.g. .ci/secrets.txt (shared with Jenkins)"
+        type: string
+        default: ""
+      bao_addr:
+        type: string
+        default: ""
+      bao_namespace:
+        type: string
+        default: ""
+      bao_mount:
+        description: KV v2 mount
+        type: string
+        default: kv/test
+      bao_auth_method:
+        description: "jwt (GitHub OIDC, nothing stored in GitHub) | approle (secrets BAO_ROLE_ID/BAO_SECRET_ID)"
+        type: string
+        default: jwt
+      bao_role:
+        description: OpenBao jwt role
+        type: string
+        default: github-actions
+      bao_jwt_mount:
+        type: string
+        default: jwt
+      bao_audience:
+        type: string
+        default: openbao
+      # ---------------------------------------------------------------- stages
+      setup:
+        description: Stage command/script (e.g. install deps). $CI_SCRIPTS = shared scripts dir.
+        type: string
+        default: ""
+      lint:
+        type: string
+        default: ""
+      test:
+        type: string
+        default: ""
+      build:
+        type: string
+        default: ""
+      deploy:
+        type: string
+        default: ""
+      # ---------------------------------------------------------------- shared scripts
+      ci_repository:
+        type: string
+        default: rizy44/workflow_beg_secret
+      ci_ref:
+        description: Ref of ci_repository to load scripts from; keep in sync with the @ref in `uses:`
+        type: string
+        default: main
+    secrets:
+      BAO_ROLE_ID:
+        required: false
+      BAO_SECRET_ID:
+        required: false
+      BAO_CACERT_PEM:
+        required: false
+      CI_REPO_TOKEN:
+        description: Only if ci_repository is private
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  pipeline:
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    environment: ${{ inputs.environment }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Load shared scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.ci_repository }}
+          ref: ${{ inputs.ci_ref }}
+          path: .workflow_beg_secret
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+          persist-credentials: false
+
+      - name: Prepare environment
+        working-directory: .
+        run: |
+          echo ".workflow_beg_secret/" >> .git/info/exclude
+          echo "CI_SCRIPTS=$GITHUB_WORKSPACE/.workflow_beg_secret/scripts" >> "$GITHUB_ENV"
+
+      - name: "stage: secrets (OpenBao)"
+        if: inputs.secrets != '' || inputs.secrets_file != ''
+        working-directory: .
+        env:
+          SECRETS_SPEC: ${{ inputs.secrets }}
+          SECRETS_FILE: ${{ inputs.secrets_file }}
+          BAO_ADDR: ${{ inputs.bao_addr }}
+          BAO_NAMESPACE: ${{ inputs.bao_namespace }}
+          BAO_MOUNT: ${{ inputs.bao_mount }}
+          BAO_AUTH_METHOD: ${{ inputs.bao_auth_method }}
+          BAO_ROLE: ${{ inputs.bao_role }}
+          BAO_JWT_MOUNT: ${{ inputs.bao_jwt_mount }}
+          BAO_JWT_AUDIENCE: ${{ inputs.bao_audience }}
+          BAO_ROLE_ID: ${{ secrets.BAO_ROLE_ID }}
+          BAO_SECRET_ID: ${{ secrets.BAO_SECRET_ID }}
+          BAO_CACERT_PEM: ${{ secrets.BAO_CACERT_PEM }}
+        run: |
+          if [ -n "$SECRETS_FILE" ]; then
+            python3 "$CI_SCRIPTS/openbao/fetch_secrets.py" --spec-file "$SECRETS_FILE"
+          else
+            python3 "$CI_SCRIPTS/openbao/fetch_secrets.py"
+          fi
+
+      - name: "stage: setup"
+        if: inputs.setup != ''
+        env:
+          STAGE_CMD: ${{ inputs.setup }}
+        run: bash -euo pipefail -c "$STAGE_CMD"
+
+      - name: "stage: lint"
+        if: inputs.lint != ''
+        env:
+          STAGE_CMD: ${{ inputs.lint }}
+        run: bash -euo pipefail -c "$STAGE_CMD"
+
+      - name: "stage: test"
+        if: inputs.test != ''
+        env:
+          STAGE_CMD: ${{ inputs.test }}
+        run: bash -euo pipefail -c "$STAGE_CMD"
+
+      - name: "stage: build"
+        if: inputs.build != ''
+        env:
+          STAGE_CMD: ${{ inputs.build }}
+        run: bash -euo pipefail -c "$STAGE_CMD"
+
+      - name: "stage: deploy"
+        if: inputs.deploy != ''
+        env:
+          STAGE_CMD: ${{ inputs.deploy }}
+        run: bash -euo pipefail -c "$STAGE_CMD"

@@ -22,5 +22,6 @@ jobs:
           cache: pip
           cache-dependency-path: scripts/requirements-dev.txt
       - run: pip install -r requirements-dev.txt
-      - run: ruff check . ../.github/actions
-      - run: pytest -q
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: python -m pytest -q

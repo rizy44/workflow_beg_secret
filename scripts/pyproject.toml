@@ -1,7 +1,7 @@
 [project]
-name = "beg-secret"
+name = "workflow-beg-secret-scripts"
 version = "0.1.0"
-description = "Sync secrets from OpenBao to GitHub Actions secrets and Jenkins credentials"
+description = "Stage scripts for the generic CI workflow (OpenBao secrets, sync to Jenkins)"
 requires-python = ">=3.10"
 
 [tool.ruff]
@@ -13,3 +13,6 @@ select = ["E", "F", "I", "B", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["common", "openbao", "conftest"]
